@@ -48,6 +48,11 @@ static int cmd_exec(void *arg){
     struct params *params = (struct params*) arg;
 
     await_setup(params->fd[0]);
+    //assuming 0 in the current namespace maps to some unprivilaged UID in the parent namespace
+    if (setgid(0) == -1)
+        die("Failed to setgid: %m\n");
+    if (setuid(0) == -1)
+        die("Failed to setuid: %m\n");
 
     char **argv = params->argv;
     char *cmd = argv[0];
@@ -61,6 +66,37 @@ static int cmd_exec(void *arg){
     return 1;
 }
 
+
+static void write_file(char path[100], char line[100]){
+    FILE *f = fopen(path, "w");
+    if (f == NULL){
+        die("failed to open file %s: %m\n", path);
+    }
+    if (fwrite(line, 1, strlen(line), f) < 0){
+        die("failed to write to file %s: \n", path);
+    }
+    if (fclose(f) != 0){
+        die("failed to close file %s: %m\n", path);
+    }
+}
+
+static void prepare_userns(int pid){
+    char path[100];
+    char line[100];
+    int uid = 1000;
+    sprintf(path, "/proc/%d/uid_map", pid);
+    sprintf(line, "0 %d 1\n", uid);
+    write_file(path, line);
+
+    sprintf(path, "/proc/%d/setgroups", pid);
+    sprintf(line, "deny");
+    write_file(path, line);
+
+    sprintf(path, "/proc/%d/gid_map", pid);
+    sprintf(line, "0 %d 1\n", uid);
+    write_file(path, line);
+}
+
 int main(int argc, char **argv)
 {
     struct params params;
@@ -68,13 +104,14 @@ int main(int argc, char **argv)
     parse_args(argc, argv, &params);
     if (pipe(params.fd) < 0)
         die("Failed to create pipe: %m");
-    int clone_flags = SIGCHLD | CLONE_NEWUTS;
+    int clone_flags = SIGCHLD | CLONE_NEWUTS | CLONE_NEWUSER;
     int cmd_pid = clone(cmd_exec, cmd_stack + STACKSIZ, clone_flags, &params);
 
     if (cmd_pid < 0)
         die("Failed to clone: %m\n");
     int pipe = params.fd[1];
 
+    prepare_userns(cmd_pid); //namepspace setup
     if (write(pipe, "OK", 2) != 2)
         die("Failed to write to pipe: %m");
     if (close(pipe))
