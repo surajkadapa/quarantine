@@ -6,6 +6,7 @@
 #include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <wait.h>
 #include <memory.h>
 #include <syscall.h>
@@ -71,13 +72,13 @@ static int cmd_exec(void *arg){
 
     if(execvp(cmd, argv) == -1)
         die("failed to exec %s: %m\n", cmd);
-    
+
     die("done\n");
     return 1;
 }
 
 
-static void write_file(char path[100], char line[100]){
+static void write_file(char *path, char *line){
     FILE *f = fopen(path, "w");
     if (f == NULL){
         die("failed to open file %s: %m\n", path);
@@ -115,7 +116,7 @@ static void prepare_procfs(){
 }
 static void prepare_mntns(char *rootfs){
     const char *mnt = rootfs;
-    
+
     //mouting the rootfs from the alpine root filesystem
     if(mount(rootfs, mnt, "ext4", MS_BIND, ""))
         die("failed to mount %s: %m\n", rootfs, mnt);
@@ -133,11 +134,38 @@ static void prepare_mntns(char *rootfs){
     if(chdir("/"))
         die("failed to access new root: %m\n");
     //have to unmount the old filesystem(old_fs)
-    
-    //need to create a new PID namespace 
+
+    //need to create a new PID namespace
     prepare_procfs();
     if(umount2(old_fs, MNT_DETACH))
         die("failed to unmount old_fs %s: %m\n", old_fs);
+}
+
+void setup_cgroups(const char *cgroup_name, int pid, size_t memory_limit, int cpu_shares){
+    char path[256];
+
+    //create the cgroup directory
+    snprintf(path, sizeof(path), "%s%s", CGROUP_DIR, cgroup_name);
+    if(mkdir(path, 0755) == -1 && errno != EEXIST)
+        die("failed to create cgroup directory: %m\n", path);
+
+    //set memory limits
+    snprintf(path, sizeof(path), "%s%s%s" CGROUP_DIR, cgroup_name, MEMORY_LIMIT_FILE);
+    char mem_limit_str[20];
+    snprintf(mem_limit_str, sizeof(mem_limit_str), "%zu", memory_limit);
+    write_file(path, mem_limit_str);
+
+    //set cpu limits
+    snprintf(path, sizeof(path), "%s%s%s", CGROUP_DIR, cgroup_name, CPU_SHARES_FILE);
+    char cpu_shares_str[20];
+    snrpintf(cpu_shares_str, sizeof(cpu_shares_str), "%d", cpu_shares);
+    write_file(path, cpu_shares_str);
+
+    //adding the process to the cgroup
+    snprintf(path, sizeof(path), "%s%s%s", CGROUP_DIR, cgroup_name, TASKS_FILE);
+    char pid_str[20];
+    snprintf(pid_str, sizeof(pid_str), "%d", pid);
+    write_file(path, pid_str);
 }
 
 int main(int argc, char **argv)
@@ -152,6 +180,12 @@ int main(int argc, char **argv)
 
     if (cmd_pid < 0)
         die("Failed to clone: %m\n");
+
+    //setting up cgroups for the sandboxed process
+    size_t memory_limit =  50*1024*1024; //50MB
+    int cpu_shares = 256;
+    setup_cgroup("sandbox_group", cmd_pid, memory_limit, cpu_shares);
+
     int pipe = params.fd[1];
 
     prepare_userns(cmd_pid); //namepspace setup
