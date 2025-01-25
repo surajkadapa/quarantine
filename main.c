@@ -3,12 +3,20 @@
 #include <sched.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <sys/mount.h>
 #include <sys/prctl.h>
+#include <sys/stat.h>
 #include <wait.h>
 #include <memory.h>
+#include <syscall.h>
+#include <errno.h>
 
 #define STACKSIZ (1024*1024)
 static char cmd_stack[STACKSIZ];
+
+
+static void prepare_procfs();
+static void prepare_mntns(char *rootfs);
 
 struct params {
     int fd[2];
@@ -48,6 +56,8 @@ static int cmd_exec(void *arg){
     struct params *params = (struct params*) arg;
 
     await_setup(params->fd[0]);
+
+    prepare_mntns("rootfs");
     //assuming 0 in the current namespace maps to some unprivilaged UID in the parent namespace
     if (setgid(0) == -1)
         die("Failed to setgid: %m\n");
@@ -97,6 +107,39 @@ static void prepare_userns(int pid){
     write_file(path, line);
 }
 
+static void prepare_procfs(){
+    if(mkdir("/proc", 0555) && errno != EEXIST)
+        die("failed to make /proc: %m\n");
+    if(mount("proc","/proc","proc",0,""))
+        die("failed to mount proc: %m\n");
+}
+static void prepare_mntns(char *rootfs){
+    const char *mnt = rootfs;
+    
+    //mouting the rootfs from the alpine root filesystem
+    if(mount(rootfs, mnt, "ext4", MS_BIND, ""))
+        die("failed to mount %s: %m\n", rootfs, mnt);
+
+    if(chdir(mnt))
+        die("failed to chdir to rootfs mounted at %s: %m\n", mnt);
+
+    const char *old_fs = ".old_fs";
+    if(mkdir(old_fs, 0777) && errno != EEXIST)
+        die("failed to mkdir put_old %s: %m\n", old_fs);
+
+    if(syscall(SYS_pivot_root, ".", old_fs))
+        die("failed to execute pivot_root from %s to %s: %m\n", rootfs, old_fs);
+
+    if(chdir("/"))
+        die("failed to access new root: %m\n");
+    //have to unmount the old filesystem(old_fs)
+    
+    //need to create a new PID namespace 
+    prepare_procfs();
+    if(umount2(old_fs, MNT_DETACH))
+        die("failed to unmount old_fs %s: %m\n", old_fs);
+}
+
 int main(int argc, char **argv)
 {
     struct params params;
@@ -104,7 +147,7 @@ int main(int argc, char **argv)
     parse_args(argc, argv, &params);
     if (pipe(params.fd) < 0)
         die("Failed to create pipe: %m");
-    int clone_flags = SIGCHLD | CLONE_NEWUTS | CLONE_NEWUSER;
+    int clone_flags = SIGCHLD | CLONE_NEWUTS | CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID;
     int cmd_pid = clone(cmd_exec, cmd_stack + STACKSIZ, clone_flags, &params);
 
     if (cmd_pid < 0)
