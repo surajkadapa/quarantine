@@ -13,6 +13,10 @@
 #include <errno.h>
 
 #define STACKSIZ (1024*1024)
+#define CGROUP_DIR "/sys/fs/cgroup"
+#define MEMORY_LIMIT_FILE "memory.max"
+#define CPU_MAX_FILE "cpu.max"
+#define PROCS_FILE "cgroup.procs"
 static char cmd_stack[STACKSIZ];
 
 
@@ -140,29 +144,28 @@ static void prepare_mntns(char *rootfs){
     if(umount2(old_fs, MNT_DETACH))
         die("failed to unmount old_fs %s: %m\n", old_fs);
 }
-
-void setup_cgroups(const char *cgroup_name, int pid, size_t memory_limit, int cpu_shares){
+void setup_cgroups(const char *cgroup_name, int pid, size_t memory_limit, const char *cpu_max) {
     char path[256];
 
-    //create the cgroup directory
-    snprintf(path, sizeof(path), "%s%s", CGROUP_DIR, cgroup_name);
-    if(mkdir(path, 0755) == -1 && errno != EEXIST)
-        die("failed to create cgroup directory: %m\n", path);
+    // Create the cgroup directory
+    snprintf(path, sizeof(path), "%s/%s", CGROUP_DIR, cgroup_name);
+    if (mkdir(path, 0755) == -1 && errno != EEXIST) {
+        die("failed to create cgroup directory %s: %m\n", path);
+    }
 
-    //set memory limits
-    snprintf(path, sizeof(path), "%s%s%s" CGROUP_DIR, cgroup_name, MEMORY_LIMIT_FILE);
+    // Set memory limits
+    snprintf(path, sizeof(path), "%s/%s/memory.max", CGROUP_DIR, cgroup_name);
     char mem_limit_str[20];
     snprintf(mem_limit_str, sizeof(mem_limit_str), "%zu", memory_limit);
     write_file(path, mem_limit_str);
 
-    //set cpu limits
-    snprintf(path, sizeof(path), "%s%s%s", CGROUP_DIR, cgroup_name, CPU_SHARES_FILE);
-    char cpu_shares_str[20];
-    snrpintf(cpu_shares_str, sizeof(cpu_shares_str), "%d", cpu_shares);
-    write_file(path, cpu_shares_str);
+    // Set CPU max (debug values)
+    snprintf(path, sizeof(path), "%s/%s/cpu.max", CGROUP_DIR, cgroup_name);
+    printf("Writing to %s: %s\n", path, cpu_max); // Debug
+    write_file(path, cpu_max);
 
-    //adding the process to the cgroup
-    snprintf(path, sizeof(path), "%s%s%s", CGROUP_DIR, cgroup_name, TASKS_FILE);
+    // Add process to the cgroup
+    snprintf(path, sizeof(path), "%s/%s/cgroup.procs", CGROUP_DIR, cgroup_name);
     char pid_str[20];
     snprintf(pid_str, sizeof(pid_str), "%d", pid);
     write_file(path, pid_str);
@@ -184,7 +187,7 @@ int main(int argc, char **argv)
     //setting up cgroups for the sandboxed process
     size_t memory_limit =  50*1024*1024; //50MB
     int cpu_shares = 256;
-    setup_cgroup("sandbox_group", cmd_pid, memory_limit, cpu_shares);
+    setup_cgroups("sandbox_group", cmd_pid, 104857600, "50000 100000");
 
     int pipe = params.fd[1];
 
